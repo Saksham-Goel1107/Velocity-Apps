@@ -1,0 +1,150 @@
+name: Build & Release Desktop & VS Code Extension (Public velocity-apps Repo)
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+jobs:
+  # ── 1. Desktop Applications Release Job (macOS, Windows, Linux) ────────────
+  release-desktop:
+    name: Build & Release Desktop App (${{ matrix.platform }})
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: 'macos-latest'
+            args: '--target aarch64-apple-darwin'
+          - platform: 'windows-latest'
+            args: ''
+          - platform: 'ubuntu-22.04'
+            args: ''
+
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - name: Checkout public release repo
+        uses: actions/checkout@v4
+
+      - name: Checkout private source repository (Velocity)
+        uses: actions/checkout@v4
+        with:
+          repository: 'Saksham-Goel1107/Velocity'
+          token: ${{ secrets.PRIVATE_REPO_TOKEN }}
+          path: 'source-repo'
+
+      - name: Setup Node.js v24
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Install pnpm v11
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin' || '' }}
+
+      - name: Install Linux dependencies (Ubuntu only)
+        if: matrix.platform == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libssl-dev
+
+      - name: Install Node dependencies in source repository
+        run: |
+          cd source-repo/TurboRepo
+          pnpm install --no-frozen-lockfile
+
+      - name: Build Tauri App from source-repo
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: 'Velocity Desktop & VS Code Extension ${{ github.ref_name }}'
+          releaseBody: |
+            ## 🚀 Velocity Cloud Workspaces & Applications (${{ github.ref_name }})
+
+            Welcome to the official production release of **Velocity Desktop** and the **Velocity VS Code Extension**.
+
+            ---
+
+            ### 🖥️ **1. Velocity Desktop Application**
+            High-performance native client for macOS, Windows, and Linux to spin up and manage cloud development sandboxes & GPU containers.
+
+            - 🍏 **macOS (Apple Silicon)**: Download `Velocity_Desktop_*_aarch64.dmg`
+            - 🍏 **macOS (Intel)**: Download `Velocity_Desktop_*_x64.dmg`
+            - 🪟 **Windows**: Download `Velocity_Desktop_*_x64-setup.exe` or `.msi`
+            - 🐧 **Linux**: Download `Velocity_Desktop_*_amd64.AppImage` or `.deb`
+
+            ---
+
+            ### ⚡ **2. Velocity VS Code Extension (`.vsix`)**
+            Seamlessly manage sandboxes, view real-time spend analytics, and connect to Velocity MCP servers right inside VS Code.
+
+            - 🔌 **Extension Package**: Download `velocity-vscode-${{ github.ref_name }}.vsix`
+
+            #### 📖 **Installation Instructions for VS Code Extension:**
+            1. Download `velocity-vscode-${{ github.ref_name }}.vsix` below.
+            2. Open VS Code.
+            3. Press `Ctrl+Shift+X` (or `Cmd+Shift+X` on Mac) to open Extensions.
+            4. Click the **`...`** (Views & More Actions) menu in the top right corner of the Extensions sidebar.
+            5. Select **Install from VSIX...** and pick the downloaded `.vsix` file.
+            6. Run `Velocity: Sign In / Set API Key` from the Command Palette (`Ctrl+Shift+P` / `Cmd+Shift+P`) to connect your account.
+          releaseDraft: false
+          prerelease: false
+          projectPath: './source-repo/TurboRepo/apps/user-app'
+          args: ${{ matrix.args }}
+
+  # ── 2. VS Code Extension Packaging & Release Job ───────────────────────────
+  release-extension:
+    name: Package & Release VS Code Extension (.vsix)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout public release repo
+        uses: actions/checkout@v4
+
+      - name: Checkout private source repository (Velocity)
+        uses: actions/checkout@v4
+        with:
+          repository: 'Saksham-Goel1107/Velocity'
+          token: ${{ secrets.PRIVATE_REPO_TOKEN }}
+          path: 'source-repo'
+
+      - name: Setup Node.js v24
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Install pnpm v11
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11
+
+      - name: Install Node dependencies in source repository
+        run: |
+          cd source-repo/TurboRepo
+          pnpm install --no-frozen-lockfile
+
+      - name: Package VS Code Extension (.vsix)
+        run: |
+          cd source-repo/TurboRepo/apps/vscode-extension
+          pnpm run compile
+          npx @vscode/vsce package --out ../../../../velocity-vscode-${{ github.ref_name }}.vsix
+
+      - name: Upload .vsix to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: velocity-vscode-*.vsix
+          tag_name: ${{ github.ref_name }}
+          name: 'Velocity Apps & Extensions ${{ github.ref_name }}'
+        env:
+          GITHUB_TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN }}
