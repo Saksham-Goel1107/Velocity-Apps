@@ -78,6 +78,7 @@ jobs:
             ### 🖥️ **1. Velocity Desktop Application**
             High-performance native client for macOS, Windows, and Linux to spin up and manage cloud development sandboxes & GPU containers.
 
+            - 🤖 **Android**: Download `Velocity_Android_${{ github.ref_name }}.apk`
             - 🍏 **macOS (Apple Silicon)**: Download `Velocity_Desktop_*_aarch64.dmg`
             - 🍏 **macOS (Intel)**: Download `Velocity_Desktop_*_x64.dmg`
             - 🪟 **Windows**: Download `Velocity_Desktop_*_x64-setup.exe` or `.msi`
@@ -102,7 +103,110 @@ jobs:
           projectPath: './source-repo/TurboRepo/apps/user-app'
           args: ${{ matrix.args }}
 
-  # ── 2. VS Code Extension Packaging & Release Job ───────────────────────────
+  # ── 2. Android APK Release Job (Tauri Android) ────────────────────────────
+  release-android:
+    name: Build & Release Android App (.apk)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout public release repo
+        uses: actions/checkout@v4
+
+      - name: Checkout private source repository (Velocity)
+        uses: actions/checkout@v4
+        with:
+          repository: 'Saksham-Goel1107/Velocity'
+          token: ${{ secrets.PRIVATE_REPO_TOKEN }}
+          path: 'source-repo'
+
+      - name: Setup Java JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android NDK & Build Tools
+        run: |
+          sdkmanager --install "ndk;26.1.10909125" "build-tools;34.0.0" "platforms;android-34"
+
+      - name: Setup Node.js v24
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Install pnpm v11
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11
+
+      - name: Install Rust stable & Android targets
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: 'aarch64-linux-android,armv7-linux-androideabi,i686-linux-android,x86_64-linux-android'
+
+      - name: Install Node dependencies in source repository
+        run: |
+          cd source-repo/TurboRepo
+          pnpm install --no-frozen-lockfile
+
+      - name: Initialize & Build Tauri Android APK
+        env:
+          NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/26.1.10909125
+        run: |
+          cd source-repo/TurboRepo/apps/user-app
+          pnpm exec tauri android init
+          pnpm exec tauri android build --apk
+
+      - name: Setup Android Keystore & Sign APK
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD || 'velocity123' }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS || 'velocity-key' }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD || 'velocity123' }}
+        run: |
+          # Add Android build-tools (zipalign & apksigner) to PATH
+          BUILD_TOOLS_PATH=$(find ${{ env.ANDROID_HOME }}/build-tools -mindepth 1 -maxdepth 1 -type d | sort -V | tail -n 1)
+          export PATH="$BUILD_TOOLS_PATH:$PATH"
+
+          mkdir -p output-apk
+          RAW_APK=$(find source-repo/TurboRepo/apps/user-app/src-tauri/gen/android/app/build/outputs/apk -name "*.apk" | head -n 1)
+          if [ -z "$RAW_APK" ]; then
+            echo "ERROR: No built APK found in Gradle output!"
+            exit 1
+          fi
+
+          if [ -n "$ANDROID_KEYSTORE_BASE64" ]; then
+            echo "$ANDROID_KEYSTORE_BASE64" | tr -d '\r\n ' | base64 -d > release.keystore
+          else
+            echo "Generating release signing keystore..."
+            keytool -genkeypair -v -keystore release.keystore -alias "$ANDROID_KEY_ALIAS" -keyalg RSA -keysize 2048 -validity 10000 -storepass "$ANDROID_KEYSTORE_PASSWORD" -keypass "$ANDROID_KEY_PASSWORD" -dname "CN=Velocity, OU=Engineering, O=Velocity Cloud Inc, L=San Francisco, ST=CA, C=US"
+          fi
+
+          # Align & Sign APK
+          zipalign -p -f -v 4 "$RAW_APK" output-apk/aligned.apk || cp "$RAW_APK" output-apk/aligned.apk
+          apksigner sign --ks release.keystore --ks-pass "pass:$ANDROID_KEYSTORE_PASSWORD" --ks-key-alias "$ANDROID_KEY_ALIAS" --key-pass "pass:$ANDROID_KEY_PASSWORD" --out "output-apk/Velocity_Android_${{ github.ref_name }}.apk" output-apk/aligned.apk
+
+          echo "========================================================"
+          echo "         ANDROID SIGNING CERTIFICATE SHA-256 FINGERPRINT "
+          echo "========================================================"
+          keytool -printcert -jarfile "output-apk/Velocity_Android_${{ github.ref_name }}.apk" || true
+          apksigner verify --print-certs "output-apk/Velocity_Android_${{ github.ref_name }}.apk" || true
+          echo "========================================================"
+
+      - name: Upload Android APK to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: output-apk/*.apk
+          tag_name: ${{ github.ref_name }}
+          name: 'Velocity Desktop, Mobile & Extensions ${{ github.ref_name }}'
+        env:
+          GITHUB_TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN }}
+
+  # ── 3. VS Code Extension Packaging & Release Job ───────────────────────────
   release-extension:
     name: Package & Release VS Code Extension (.vsix)
     runs-on: ubuntu-latest
