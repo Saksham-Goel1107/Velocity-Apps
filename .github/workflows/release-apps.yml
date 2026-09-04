@@ -61,6 +61,11 @@ jobs:
           cd source-repo/TurboRepo
           pnpm install --no-frozen-lockfile
 
+      - name: Generate Platform App Icons
+        run: |
+          cd source-repo/TurboRepo/apps/user-app
+          pnpm exec tauri icon src-tauri/icons/icon.png
+
       - name: Build Tauri App from source-repo
         uses: tauri-apps/tauri-action@v0
         env:
@@ -158,7 +163,16 @@ jobs:
           NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/26.1.10909125
         run: |
           cd source-repo/TurboRepo/apps/user-app
+          pnpm exec tauri icon src-tauri/icons/icon.png
           pnpm exec tauri android init
+          
+          # Replace default Tauri Android launcher icons with custom Velocity brand icons
+          if [ -d "src-tauri/icons/android" ]; then
+            echo "Copying custom Velocity brand icons into generated Android project..."
+            mkdir -p src-tauri/gen/android/app/src/main/res
+            cp -rf src-tauri/icons/android/* src-tauri/gen/android/app/src/main/res/
+          fi
+          
           pnpm exec tauri android build --apk
 
       - name: Setup Android Keystore & Sign APK
@@ -173,28 +187,65 @@ jobs:
           export PATH="$BUILD_TOOLS_PATH:$PATH"
 
           mkdir -p output-apk
-          RAW_APK=$(find source-repo/TurboRepo/apps/user-app/src-tauri/gen/android/app/build/outputs/apk -name "*.apk" | head -n 1)
-          if [ -z "$RAW_APK" ]; then
-            echo "ERROR: No built APK found in Gradle output!"
-            exit 1
-          fi
 
           if [ -n "$ANDROID_KEYSTORE_BASE64" ]; then
+            echo "Using repository secret keystore..."
             echo "$ANDROID_KEYSTORE_BASE64" | tr -d '\r\n ' | base64 -d > release.keystore
           else
             echo "Generating release signing keystore..."
             keytool -genkeypair -v -keystore release.keystore -alias "$ANDROID_KEY_ALIAS" -keyalg RSA -keysize 2048 -validity 10000 -storepass "$ANDROID_KEYSTORE_PASSWORD" -keypass "$ANDROID_KEY_PASSWORD" -dname "CN=Velocity, OU=Engineering, O=Velocity Cloud Inc, L=San Francisco, ST=CA, C=US"
           fi
 
-          # Align & Sign APK
-          zipalign -p -f -v 4 "$RAW_APK" output-apk/aligned.apk || cp "$RAW_APK" output-apk/aligned.apk
-          apksigner sign --ks release.keystore --ks-pass "pass:$ANDROID_KEYSTORE_PASSWORD" --ks-key-alias "$ANDROID_KEY_ALIAS" --key-pass "pass:$ANDROID_KEY_PASSWORD" --out "output-apk/Velocity_Android_${{ github.ref_name }}.apk" output-apk/aligned.apk
+          # Locate all built APK files
+          APK_DIR="source-repo/TurboRepo/apps/user-app/src-tauri/gen/android/app/build/outputs/apk"
+          UNIVERSAL_APK=$(find "$APK_DIR" -type f -name "*universal*.apk" | head -n 1)
+          
+          if [ -z "$UNIVERSAL_APK" ]; then
+            echo "Universal APK not found, searching for any release APK..."
+            UNIVERSAL_APK=$(find "$APK_DIR" -type f -name "*.apk" | head -n 1)
+          fi
+
+          if [ -z "$UNIVERSAL_APK" ]; then
+            echo "ERROR: No built APK found in Gradle output!"
+            exit 1
+          fi
+
+          echo "Primary APK for release: $UNIVERSAL_APK"
+
+          # Sign all APKs produced
+          for APK in $(find "$APK_DIR" -type f -name "*.apk"); do
+            APK_NAME=$(basename "$APK" .apk)
+            echo "Processing $APK ($APK_NAME)..."
+            zipalign -f -p -v 4 "$APK" "output-apk/${APK_NAME}-aligned.apk" || cp "$APK" "output-apk/${APK_NAME}-aligned.apk"
+            apksigner sign --ks release.keystore \
+              --ks-pass "pass:$ANDROID_KEYSTORE_PASSWORD" \
+              --ks-key-alias "$ANDROID_KEY_ALIAS" \
+              --key-pass "pass:$ANDROID_KEY_PASSWORD" \
+              --v1-signing-enabled true \
+              --v2-signing-enabled true \
+              --v3-signing-enabled true \
+              --out "output-apk/${APK_NAME}-signed.apk" \
+              "output-apk/${APK_NAME}-aligned.apk"
+            rm -f "output-apk/${APK_NAME}-aligned.apk"
+          done
+
+          # Align & Sign Primary Universal Release APK with standard name
+          zipalign -f -p -v 4 "$UNIVERSAL_APK" output-apk/aligned_main.apk || cp "$UNIVERSAL_APK" output-apk/aligned_main.apk
+          apksigner sign --ks release.keystore \
+            --ks-pass "pass:$ANDROID_KEYSTORE_PASSWORD" \
+            --ks-key-alias "$ANDROID_KEY_ALIAS" \
+            --key-pass "pass:$ANDROID_KEY_PASSWORD" \
+            --v1-signing-enabled true \
+            --v2-signing-enabled true \
+            --v3-signing-enabled true \
+            --out "output-apk/Velocity_Android_${{ github.ref_name }}.apk" \
+            output-apk/aligned_main.apk
+          rm -f output-apk/aligned_main.apk
 
           echo "========================================================"
           echo "         ANDROID SIGNING CERTIFICATE SHA-256 FINGERPRINT "
           echo "========================================================"
-          keytool -printcert -jarfile "output-apk/Velocity_Android_${{ github.ref_name }}.apk" || true
-          apksigner verify --print-certs "output-apk/Velocity_Android_${{ github.ref_name }}.apk" || true
+          apksigner verify --verbose --print-certs "output-apk/Velocity_Android_${{ github.ref_name }}.apk" || true
           echo "========================================================"
 
       - name: Upload Android APK to GitHub Release
