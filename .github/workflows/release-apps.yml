@@ -35,20 +35,36 @@ jobs:
           token: ${{ secrets.PRIVATE_REPO_TOKEN }}
           path: 'source-repo'
 
-      - name: Setup Node.js v24
-        uses: actions/setup-node@v4
-        with:
-          node-version: 24
-
       - name: Install pnpm v11
         uses: pnpm/action-setup@v4
         with:
           version: 11
 
+      - name: Setup Node.js v24 with pnpm cache
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: 'pnpm'
+          cache-dependency-path: 'source-repo/TurboRepo/pnpm-lock.yaml'
+
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin' || '' }}
+
+      - name: Cache Rust dependencies & build artifacts
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: 'source-repo/TurboRepo/apps/user-app/src-tauri'
+
+      - name: Cache apt packages
+        if: matrix.platform == 'ubuntu-22.04'
+        uses: actions/cache@v4
+        with:
+          path: /var/cache/apt/archives
+          key: ${{ runner.os }}-apt-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-apt-
 
       - name: Install Linux dependencies (Ubuntu only)
         if: matrix.platform == 'ubuntu-22.04'
@@ -138,20 +154,27 @@ jobs:
         run: |
           sdkmanager --install "ndk;26.1.10909125" "build-tools;34.0.0" "platforms;android-34"
 
-      - name: Setup Node.js v24
-        uses: actions/setup-node@v4
-        with:
-          node-version: 24
-
       - name: Install pnpm v11
         uses: pnpm/action-setup@v4
         with:
           version: 11
 
+      - name: Setup Node.js v24 with pnpm cache
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: 'pnpm'
+          cache-dependency-path: 'source-repo/TurboRepo/pnpm-lock.yaml'
+
       - name: Install Rust stable & Android targets
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: 'aarch64-linux-android,armv7-linux-androideabi,i686-linux-android,x86_64-linux-android'
+          targets: 'aarch64-linux-android,x86_64-linux-android'
+
+      - name: Cache Rust dependencies & build artifacts
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: 'source-repo/TurboRepo/apps/user-app/src-tauri'
 
       - name: Install Node dependencies in source repository
         run: |
@@ -274,15 +297,17 @@ jobs:
           token: ${{ secrets.PRIVATE_REPO_TOKEN }}
           path: 'source-repo'
 
-      - name: Setup Node.js v24
-        uses: actions/setup-node@v4
-        with:
-          node-version: 24
-
       - name: Install pnpm v11
         uses: pnpm/action-setup@v4
         with:
           version: 11
+
+      - name: Setup Node.js v24 with pnpm cache
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: 'pnpm'
+          cache-dependency-path: 'source-repo/TurboRepo/pnpm-lock.yaml'
 
       - name: Install Node dependencies in source repository
         run: |
