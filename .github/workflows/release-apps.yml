@@ -82,6 +82,29 @@ jobs:
           cd source-repo/TurboRepo/apps/user-app
           pnpm exec tauri icon src-tauri/icons/icon.png
 
+      - name: Setup Windows Code Signing Certificate
+        if: matrix.platform == 'windows-latest'
+        env:
+          WINDOWS_CERTIFICATE_BASE64: ${{ secrets.WINDOWS_CERTIFICATE_BASE64 }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        shell: powershell
+        run: |
+          if ($env:WINDOWS_CERTIFICATE_BASE64) {
+            Write-Host "Importing production Code Signing Certificate from repository secret..."
+            $certBytes = [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE_BASE64.Trim())
+            [IO.File]::WriteAllBytes("cert.pfx", $certBytes)
+            $securePassword = ConvertTo-SecureString -String $env:WINDOWS_CERTIFICATE_PASSWORD -Force -AsPlainText
+            $cert = Import-PfxCertificate -FilePath "cert.pfx" -CertStoreLocation "Cert:\CurrentUser\My" -Password $securePassword
+            Remove-Item "cert.pfx" -Force -ErrorAction SilentlyContinue
+            echo "TAURI_WINDOWS_CERTIFICATE_THUMBPRINT=$($cert.Thumbprint)" | Out-File -FilePath $env:GITHUB_ENV -Append
+            Write-Host "Production Certificate Thumbprint: $($cert.Thumbprint) ($($cert.Subject))"
+          } else {
+            Write-Host "Generating fallback Authenticode Code Signing Certificate..."
+            $cert = New-SelfSignedCertificate -Type CodeSigningCert -Subject "CN=Velocity, O=Velocity Cloud Inc, L=San Francisco, S=California, C=US" -CertStoreLocation "Cert:\CurrentUser\My" -KeyExportPolicy Exportable -KeySpec Signature -KeyLength 2048 -KeyAlgorithm RSA -HashAlgorithm SHA256 -NotAfter (Get-Date).AddYears(5)
+            echo "TAURI_WINDOWS_CERTIFICATE_THUMBPRINT=$($cert.Thumbprint)" | Out-File -FilePath $env:GITHUB_ENV -Append
+            Write-Host "Fallback Certificate Thumbprint: $($cert.Thumbprint)"
+          }
+
       - name: Build Tauri App from source-repo
         uses: tauri-apps/tauri-action@v0
         env:
@@ -123,6 +146,36 @@ jobs:
           prerelease: false
           projectPath: './source-repo/TurboRepo/apps/user-app'
           args: ${{ matrix.args }}
+
+      - name: Sign & Verify Windows Binaries (signtool)
+        if: matrix.platform == 'windows-latest'
+        shell: powershell
+        run: |
+          $signtool = (Get-ChildItem -Path "C:\Program Files (x86)\Windows Kits\10\bin\*\x64\signtool.exe" | Select-Object -First 1).FullName
+          Write-Host "Using signtool at: $signtool"
+          
+          Get-ChildItem -Path "source-repo/TurboRepo/apps/user-app/src-tauri/target/release/bundle" -Recurse -Include *.exe,*.msi | ForEach-Object {
+            Write-Host "Signing and timestamping $($_.FullName)..."
+            & $signtool sign /sha1 $env:TAURI_WINDOWS_CERTIFICATE_THUMBPRINT /fd sha256 /tr http://timestamp.digicert.com /td sha256 /d "Velocity Desktop" /du "https://velocity.fairarena.app" $_.FullName
+            $sig = Get-AuthenticodeSignature $_.FullName
+            Write-Host "Signature verified: $($sig.SignerCertificate.Subject) [Thumbprint: $($sig.SignerCertificate.Thumbprint)]"
+          }
+
+      - name: Export & Upload Windows Public Root Certificate
+        if: matrix.platform == 'windows-latest'
+        shell: powershell
+        run: |
+          $cert = Get-Item "Cert:\CurrentUser\My\$($env:TAURI_WINDOWS_CERTIFICATE_THUMBPRINT)"
+          Export-Certificate -Cert $cert -FilePath "Velocity_Root_Certificate.cer" -Type CERT
+
+      - name: Upload Windows Certificate to GitHub Release
+        if: matrix.platform == 'windows-latest'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: Velocity_Root_Certificate.cer
+          tag_name: ${{ github.ref_name }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN }}
 
   # ── 2. Android APK Release Job (Tauri Android) ────────────────────────────
   release-android:
@@ -201,9 +254,9 @@ jobs:
       - name: Setup Android Keystore & Sign APK
         env:
           ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
-          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD || 'velocity123' }}
-          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS || 'velocity-key' }}
-          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD || 'velocity123' }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: |
           # Add Android build-tools (zipalign & apksigner) to PATH
           BUILD_TOOLS_PATH=$(find ${{ env.ANDROID_HOME }}/build-tools -mindepth 1 -maxdepth 1 -type d | sort -V | tail -n 1)
