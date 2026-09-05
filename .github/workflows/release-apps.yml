@@ -90,25 +90,23 @@ jobs:
         shell: powershell
         run: |
           if ($env:WINDOWS_CERTIFICATE_BASE64) {
-            Write-Host "Importing production Code Signing Certificate from repository secret..."
             $certBytes = [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE_BASE64.Trim())
             [IO.File]::WriteAllBytes("cert.pfx", $certBytes)
             $securePassword = ConvertTo-SecureString -String $env:WINDOWS_CERTIFICATE_PASSWORD -Force -AsPlainText
             $cert = Import-PfxCertificate -FilePath "cert.pfx" -CertStoreLocation "Cert:\CurrentUser\My" -Password $securePassword
             Remove-Item "cert.pfx" -Force -ErrorAction SilentlyContinue
             echo "TAURI_WINDOWS_CERTIFICATE_THUMBPRINT=$($cert.Thumbprint)" | Out-File -FilePath $env:GITHUB_ENV -Append
-            Write-Host "Production Certificate Thumbprint: $($cert.Thumbprint) ($($cert.Subject))"
           } else {
-            Write-Host "Generating fallback Authenticode Code Signing Certificate..."
             $cert = New-SelfSignedCertificate -Type CodeSigningCert -Subject "CN=Velocity, O=Velocity Cloud Inc, L=San Francisco, S=California, C=US" -CertStoreLocation "Cert:\CurrentUser\My" -KeyExportPolicy Exportable -KeySpec Signature -KeyLength 2048 -KeyAlgorithm RSA -HashAlgorithm SHA256 -NotAfter (Get-Date).AddYears(5)
             echo "TAURI_WINDOWS_CERTIFICATE_THUMBPRINT=$($cert.Thumbprint)" | Out-File -FilePath $env:GITHUB_ENV -Append
-            Write-Host "Fallback Certificate Thumbprint: $($cert.Thumbprint)"
           }
 
       - name: Build Tauri App from source-repo
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           tagName: ${{ github.ref_name }}
           releaseName: 'Velocity Desktop & VS Code Extension ${{ github.ref_name }}'
@@ -152,13 +150,8 @@ jobs:
         shell: powershell
         run: |
           $signtool = (Get-ChildItem -Path "C:\Program Files (x86)\Windows Kits\10\bin\*\x64\signtool.exe" | Select-Object -First 1).FullName
-          Write-Host "Using signtool at: $signtool"
-          
           Get-ChildItem -Path "source-repo/TurboRepo/apps/user-app/src-tauri/target/release/bundle" -Recurse -Include *.exe,*.msi | ForEach-Object {
-            Write-Host "Signing and timestamping $($_.FullName)..."
             & $signtool sign /sha1 $env:TAURI_WINDOWS_CERTIFICATE_THUMBPRINT /fd sha256 /tr http://timestamp.digicert.com /td sha256 /d "Velocity Desktop" /du "https://velocity.fairarena.app" $_.FullName
-            $sig = Get-AuthenticodeSignature $_.FullName
-            Write-Host "Signature verified: $($sig.SignerCertificate.Subject) [Thumbprint: $($sig.SignerCertificate.Thumbprint)]"
           }
 
       - name: Export & Upload Windows Public Root Certificate & Signed Binaries
@@ -168,13 +161,15 @@ jobs:
           $cert = Get-Item "Cert:\CurrentUser\My\$($env:TAURI_WINDOWS_CERTIFICATE_THUMBPRINT)"
           Export-Certificate -Cert $cert -FilePath "Velocity_Root_Certificate.cer" -Type CERT
 
-      - name: Upload Signed Windows Binaries to GitHub Release
+      - name: Upload Signed Windows Binaries & Updater Signatures to GitHub Release
         if: matrix.platform == 'windows-latest'
         uses: softprops/action-gh-release@v2
         with:
           files: |
             source-repo/TurboRepo/apps/user-app/src-tauri/target/release/bundle/nsis/*.exe
+            source-repo/TurboRepo/apps/user-app/src-tauri/target/release/bundle/nsis/*.exe.sig
             source-repo/TurboRepo/apps/user-app/src-tauri/target/release/bundle/msi/*.msi
+            source-repo/TurboRepo/apps/user-app/src-tauri/target/release/bundle/msi/*.msi.sig
             Velocity_Root_Certificate.cer
           tag_name: ${{ github.ref_name }}
         env:
@@ -268,10 +263,8 @@ jobs:
           mkdir -p output-apk
 
           if [ -n "$ANDROID_KEYSTORE_BASE64" ]; then
-            echo "Using repository secret keystore..."
             echo "$ANDROID_KEYSTORE_BASE64" | tr -d '\r\n ' | base64 -d > release.keystore
           else
-            echo "Generating release signing keystore..."
             keytool -genkeypair -v -keystore release.keystore -alias "$ANDROID_KEY_ALIAS" -keyalg RSA -keysize 2048 -validity 10000 -storepass "$ANDROID_KEYSTORE_PASSWORD" -keypass "$ANDROID_KEY_PASSWORD" -dname "CN=Velocity, OU=Engineering, O=Velocity Cloud Inc, L=San Francisco, ST=CA, C=US"
           fi
 
@@ -280,7 +273,6 @@ jobs:
           UNIVERSAL_APK=$(find "$APK_DIR" -type f -name "*universal*.apk" | head -n 1)
           
           if [ -z "$UNIVERSAL_APK" ]; then
-            echo "Universal APK not found, searching for any release APK..."
             UNIVERSAL_APK=$(find "$APK_DIR" -type f -name "*.apk" | head -n 1)
           fi
 
@@ -289,10 +281,7 @@ jobs:
             exit 1
           fi
 
-          echo "Primary APK for release: $UNIVERSAL_APK"
-
           # Align & Sign Primary Universal Release APK with standard name
-          echo "Aligning and signing $UNIVERSAL_APK -> output-apk/Velocity_Android_${{ github.ref_name }}.apk..."
           zipalign -f -p -v 4 "$UNIVERSAL_APK" output-apk/aligned_main.apk || cp "$UNIVERSAL_APK" output-apk/aligned_main.apk
           apksigner sign --ks release.keystore \
             --ks-pass "pass:$ANDROID_KEYSTORE_PASSWORD" \
@@ -305,11 +294,7 @@ jobs:
             output-apk/aligned_main.apk
           rm -f output-apk/aligned_main.apk
 
-          echo "========================================================"
-          echo "         ANDROID SIGNING CERTIFICATE SHA-256 FINGERPRINT "
-          echo "========================================================"
-          apksigner verify --verbose --print-certs "output-apk/Velocity_Android_${{ github.ref_name }}.apk" || true
-          echo "========================================================"
+          apksigner verify "output-apk/Velocity_Android_${{ github.ref_name }}.apk"
 
       - name: Upload Android APK to GitHub Release
         uses: softprops/action-gh-release@v2
