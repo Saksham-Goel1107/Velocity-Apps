@@ -231,7 +231,7 @@ jobs:
           sdkmanager --install "ndk;26.1.10909125" "build-tools;34.0.0" "platforms;android-34"
 
       - name: Setup Gradle Cache
-        uses: gradle/actions/setup-gradle@v4
+        uses: gradle/actions/setup-gradle@v5
 
       - name: Install pnpm
         uses: pnpm/action-setup@v4
