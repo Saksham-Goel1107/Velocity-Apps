@@ -69,7 +69,7 @@ jobs:
 
       - name: Cache apt packages
         if: matrix.platform == 'ubuntu-22.04'
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: /var/cache/apt/archives
           key: ${{ runner.os }}-apt-${{ hashFiles('**/Cargo.lock') }}
@@ -219,7 +219,7 @@ jobs:
 
       - name: Cache Android NDK
         id: cache-ndk
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ${{ env.ANDROID_HOME }}/ndk/26.1.10909125
           key: android-ndk-26.1.10909125
