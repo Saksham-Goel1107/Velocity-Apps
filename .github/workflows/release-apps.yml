@@ -36,7 +36,7 @@ jobs:
           path: 'source-repo'
 
       - name: Install pnpm v11
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@v6
         with:
           version: 11
 
@@ -206,7 +206,7 @@ jobs:
           sdkmanager --install "ndk;26.1.10909125" "build-tools;34.0.0" "platforms;android-34"
 
       - name: Install pnpm v11
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@v6
         with:
           version: 11
 
@@ -323,7 +323,7 @@ jobs:
           path: 'source-repo'
 
       - name: Install pnpm v11
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@v6
         with:
           version: 11
 
