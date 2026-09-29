@@ -26,10 +26,10 @@ jobs:
     runs-on: ${{ matrix.platform }}
     steps:
       - name: Checkout public release repo
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Checkout private source repository (Velocity)
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: 'Saksham-Goel1107/Velocity'
           token: ${{ secrets.PRIVATE_REPO_TOKEN }}
@@ -183,10 +183,10 @@ jobs:
       contents: write
     steps:
       - name: Checkout public release repo
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Checkout private source repository (Velocity)
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: 'Saksham-Goel1107/Velocity'
           token: ${{ secrets.PRIVATE_REPO_TOKEN }}
@@ -313,10 +313,10 @@ jobs:
       contents: write
     steps:
       - name: Checkout public release repo
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Checkout private source repository (Velocity)
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: 'Saksham-Goel1107/Velocity'
           token: ${{ secrets.PRIVATE_REPO_TOKEN }}
