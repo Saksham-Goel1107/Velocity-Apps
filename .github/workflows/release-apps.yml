@@ -25,25 +25,34 @@ jobs:
 
     runs-on: ${{ matrix.platform }}
     steps:
+      - name: Verify Code Signing Secrets Presence
+        shell: bash
+        run: |
+          if [ -z "${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}" ]; then
+            echo "::error::TAURI_SIGNING_PRIVATE_KEY secret is missing! Desktop releases MUST be cryptographically signed with Minisign."
+            exit 1
+          fi
+          echo "Verified: Tauri minisign updater private key is present."
+
       - name: Checkout public release repo
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7.0.1
 
       - name: Checkout private source repository (Velocity)
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7.0.1
         with:
           repository: 'Saksham-Goel1107/Velocity'
           token: ${{ secrets.PRIVATE_REPO_TOKEN }}
           path: 'source-repo'
 
-      - name: Install pnpm v11
+      - name: Install pnpm
         uses: pnpm/action-setup@v4
         with:
-          version: 11
+          version: 12.6.0
 
-      - name: Setup Node.js v24 with pnpm cache
-        uses: actions/setup-node@v4
+      - name: Setup Node.js with pnpm store cache
+        uses: actions/setup-node@v7
         with:
-          node-version: 24
+          node-version: 26
           cache: 'pnpm'
           cache-dependency-path: 'source-repo/TurboRepo/pnpm-lock.yaml'
 
@@ -56,6 +65,7 @@ jobs:
         uses: swatinem/rust-cache@v2
         with:
           workspaces: 'source-repo/TurboRepo/apps/user-app/src-tauri'
+          cache-all-crates: true
 
       - name: Cache apt packages
         if: matrix.platform == 'ubuntu-22.04'
@@ -182,11 +192,20 @@ jobs:
     permissions:
       contents: write
     steps:
+      - name: Verify Android Signing Secrets Presence
+        shell: bash
+        run: |
+          if [ -z "${{ secrets.ANDROID_KEYSTORE_PASSWORD }}" ] || [ -z "${{ secrets.ANDROID_KEY_ALIAS }}" ]; then
+            echo "::error::ANDROID_KEYSTORE_PASSWORD or ANDROID_KEY_ALIAS is missing! Android APK must be signed before distribution."
+            exit 1
+          fi
+          echo "Verified: Android signing secrets are configured."
+
       - name: Checkout public release repo
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7.0.1
 
       - name: Checkout private source repository (Velocity)
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7.0.1
         with:
           repository: 'Saksham-Goel1107/Velocity'
           token: ${{ secrets.PRIVATE_REPO_TOKEN }}
@@ -198,22 +217,31 @@ jobs:
           distribution: 'temurin'
           java-version: '17'
 
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
+      - name: Cache Android NDK
+        id: cache-ndk
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.ANDROID_HOME }}/ndk/26.1.10909125
+          key: android-ndk-26.1.10909125
 
       - name: Install Android NDK & Build Tools
+        if: steps.cache-ndk.outputs.cache-hit != 'true'
         run: |
+          yes | sdkmanager --licenses || true
           sdkmanager --install "ndk;26.1.10909125" "build-tools;34.0.0" "platforms;android-34"
 
-      - name: Install pnpm v11
+      - name: Setup Gradle Cache
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Install pnpm
         uses: pnpm/action-setup@v4
         with:
-          version: 11
+          version: 12.6.0
 
-      - name: Setup Node.js v24 with pnpm cache
-        uses: actions/setup-node@v4
+      - name: Setup Node.js with pnpm store cache
+        uses: actions/setup-node@v7
         with:
-          node-version: 24
+          node-version: 26
           cache: 'pnpm'
           cache-dependency-path: 'source-repo/TurboRepo/pnpm-lock.yaml'
 
@@ -226,6 +254,7 @@ jobs:
         uses: swatinem/rust-cache@v2
         with:
           workspaces: 'source-repo/TurboRepo/apps/user-app/src-tauri'
+          cache-all-crates: true
 
       - name: Install Node dependencies in source repository
         run: |
@@ -322,12 +351,12 @@ jobs:
           token: ${{ secrets.PRIVATE_REPO_TOKEN }}
           path: 'source-repo'
 
-      - name: Install pnpm v11
+      - name: Install pnpm
         uses: pnpm/action-setup@v4
         with:
-          version: 11
+          version: 12.6.0
 
-      - name: Setup Node.js v24 with pnpm cache
+      - name: Setup Node.js with pnpm store cache
         uses: actions/setup-node@v4
         with:
           node-version: 24
@@ -337,7 +366,7 @@ jobs:
       - name: Install Node dependencies in source repository
         run: |
           cd source-repo/TurboRepo
-          pnpm install --no-frozen-lockfile
+          pnpm install --no-frozen-lockfile --filter velocity-vscode...
 
       - name: Package VS Code Extension (.vsix)
         run: |
@@ -351,5 +380,116 @@ jobs:
           files: velocity-vscode-*.vsix
           tag_name: ${{ github.ref_name }}
           name: 'Velocity Apps & Extensions ${{ github.ref_name }}'
+        env:
+          GITHUB_TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN }}
+
+  # ── 4. Publish Tauri In-App Auto-Updater Manifest (latest.json) ───────────
+  publish-updater-manifest:
+    name: Publish Signed Auto-Updater Manifest (latest.json)
+    needs: [release-desktop]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Generate and Upload latest.json for Tauri Updater
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.PRIVATE_REPO_TOKEN }}
+          script: |
+            const tag = context.ref.replace('refs/tags/', '');
+            const version = tag.replace(/^v/, '');
+
+            const release = await github.rest.repos.getReleaseByTag({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              tag: tag
+            });
+
+            const assets = release.data.assets || [];
+            console.log(`Found ${assets.length} assets for release ${tag}`);
+
+            // Download helper
+            async function getAssetContent(assetName) {
+              const asset = assets.find(a => a.name === assetName);
+              if (!asset) return null;
+              const res = await github.rest.repos.getReleaseAsset({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                asset_id: asset.id,
+                headers: { accept: 'application/octet-stream' }
+              });
+              return Buffer.from(res.data).toString('utf-8').trim();
+            }
+
+            const platforms = {};
+
+            // 1. macOS aarch64
+            const macArmApp = assets.find(a => (a.name.endsWith('.app.tar.gz') || a.name.endsWith('.dmg')) && a.name.includes('aarch64'));
+            const macArmSig = assets.find(a => (a.name.endsWith('.app.tar.gz.sig') || a.name.endsWith('.dmg.sig')) && a.name.includes('aarch64'));
+            if (macArmApp && macArmSig) {
+              const signature = await getAssetContent(macArmSig.name);
+              if (signature) {
+                platforms['darwin-aarch64'] = {
+                  signature: signature,
+                  url: macArmApp.browser_download_url
+                };
+              }
+            }
+
+            // 2. macOS x86_64
+            const macX64App = assets.find(a => (a.name.endsWith('.app.tar.gz') || a.name.endsWith('.dmg')) && (a.name.includes('x64') || a.name.includes('x86_64')));
+            const macX64Sig = assets.find(a => (a.name.endsWith('.app.tar.gz.sig') || a.name.endsWith('.dmg.sig')) && (a.name.includes('x64') || a.name.includes('x86_64')));
+            if (macX64App && macX64Sig) {
+              const signature = await getAssetContent(macX64Sig.name);
+              if (signature) {
+                platforms['darwin-x86_64'] = {
+                  signature: signature,
+                  url: macX64App.browser_download_url
+                };
+              }
+            }
+
+            // 3. Windows x86_64 (nsis / setup.exe / zip)
+            const winApp = assets.find(a => (a.name.endsWith('.nsis.zip') || a.name.endsWith('.exe')) && !a.name.endsWith('.sig'));
+            const winSig = assets.find(a => (a.name.endsWith('.nsis.zip.sig') || a.name.endsWith('.exe.sig') || a.name.endsWith('.msi.sig')));
+            if (winApp && winSig) {
+              const signature = await getAssetContent(winSig.name);
+              if (signature) {
+                platforms['windows-x86_64'] = {
+                  signature: signature,
+                  url: winApp.browser_download_url
+                };
+              }
+            }
+
+            // 4. Linux x86_64 (AppImage)
+            const linuxApp = assets.find(a => a.name.endsWith('.AppImage.tar.gz') || a.name.endsWith('.AppImage'));
+            const linuxSig = assets.find(a => a.name.endsWith('.AppImage.tar.gz.sig') || a.name.endsWith('.AppImage.sig'));
+            if (linuxApp && linuxSig) {
+              const signature = await getAssetContent(linuxSig.name);
+              if (signature) {
+                platforms['linux-x86_64'] = {
+                  signature: signature,
+                  url: linuxApp.browser_download_url
+                };
+              }
+            }
+
+            const manifest = {
+              version: version,
+              notes: `Release ${tag} - Velocity Cloud Workspaces & Applications`,
+              pub_date: new Date().toISOString(),
+              platforms: platforms
+            };
+
+            const fs = require('fs');
+            fs.writeFileSync('latest.json', JSON.stringify(manifest, null, 2));
+            console.log('Generated updater manifest latest.json:\n', JSON.stringify(manifest, null, 2));
+
+      - name: Upload latest.json updater manifest to Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: latest.json
+          tag_name: ${{ github.ref_name }}
         env:
           GITHUB_TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN }}
