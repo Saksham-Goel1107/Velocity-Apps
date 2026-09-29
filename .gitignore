@@ -1,0 +1,6 @@
+# ── Signing certificate artefacts (NEVER commit these) ──
+scripts/velocity-vsix-cert.pfx
+scripts/velocity-vsix-cert.b64.txt
+scripts/velocity-vsix-cert.password.txt
+*.pfx
+*.p12

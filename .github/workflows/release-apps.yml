@@ -1,198 +1,268 @@
-name: Build & Release Desktop & VS Code Extension (Public velocity-apps Repo)
+name: Release Velocity Apps
 
 on:
   push:
     tags:
       - 'v*'
   workflow_dispatch:
+    inputs:
+      prerelease:
+        description: 'Mark as pre-release?'
+        required: false
+        default: 'false'
+        type: choice
+        options:
+          - 'false'
+          - 'true'
 
+# Only one release pipeline runs per ref at a time; never cancel in-flight.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+# ── Shared path constants ────────────────────────────────────────────────────
+env:
+  PNPM_VERSION:        '12'
+  NODE_VERSION:        '26'
+  TURBO_ROOT:          'source-repo/TurboRepo'
+  PNPM_LOCK_PATH:      'source-repo/TurboRepo/pnpm-lock.yaml'
+  TAURI_APP_PATH:      'source-repo/TurboRepo/apps/user-app'
+  TAURI_BUNDLE_PATH:   'source-repo/TurboRepo/apps/user-app/src-tauri/target/release/bundle'
+  TAURI_SRC_PATH:      'source-repo/TurboRepo/apps/user-app/src-tauri'
+  VSCODE_EXT_PATH:     'source-repo/TurboRepo/apps/vscode-extension'
+  VSIX_OUTPUT:         'velocity-vscode-${{ github.ref_name }}.vsix'
+
+# ═══════════════════════════════════════════════════════════════════════════
+# JOB 1 ── Desktop (macOS · Windows · Linux)
+# ═══════════════════════════════════════════════════════════════════════════
 jobs:
-  # ── 1. Desktop Applications Release Job (macOS, Windows, Linux) ────────────
   release-desktop:
-    name: Build & Release Desktop App (${{ matrix.platform }})
+    name: Desktop / ${{ matrix.platform }}
+    timeout-minutes: 90
     permissions:
       contents: write
     strategy:
       fail-fast: false
       matrix:
         include:
-          - platform: 'macos-latest'
-            args: '--target aarch64-apple-darwin'
-          - platform: 'windows-latest'
-            args: ''
-          - platform: 'ubuntu-22.04'
-            args: ''
+          - platform:     'macos-latest'
+            args:         '--target aarch64-apple-darwin'
+            rust-targets: 'aarch64-apple-darwin'
+          - platform:     'windows-latest'
+            args:         ''
+            rust-targets: ''
+          - platform:     'ubuntu-22.04'
+            args:         ''
+            rust-targets: ''
 
     runs-on: ${{ matrix.platform }}
+
     steps:
-      - name: Checkout public release repo
+      # ── Source ──────────────────────────────────────────────────────────────
+      - name: Checkout release repo
         uses: actions/checkout@v4
 
-      - name: Checkout private source repository (Velocity)
+      - name: Checkout private source repo
         uses: actions/checkout@v4
         with:
           repository: 'Saksham-Goel1107/Velocity'
-          token: ${{ secrets.PRIVATE_REPO_TOKEN }}
-          path: 'source-repo'
+          token:      ${{ secrets.PRIVATE_REPO_TOKEN }}
+          path:       'source-repo'
 
-      - name: Install pnpm v12
+      # ── Toolchain ───────────────────────────────────────────────────────────
+      - name: Install pnpm ${{ env.PNPM_VERSION }}
         uses: pnpm/action-setup@v4
         with:
-          version: 12
+          version: ${{ env.PNPM_VERSION }}
 
-      - name: Setup Node.js v26 with pnpm cache
+      - name: Setup Node ${{ env.NODE_VERSION }}
         uses: actions/setup-node@v7
         with:
-          node-version: 26
-          cache: 'pnpm'
-          cache-dependency-path: 'source-repo/TurboRepo/pnpm-lock.yaml'
+          node-version:         ${{ env.NODE_VERSION }}
+          cache:                'pnpm'
+          cache-dependency-path: ${{ env.PNPM_LOCK_PATH }}
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin' || '' }}
+          targets: ${{ matrix.rust-targets }}
 
-      - name: Cache Rust dependencies & build artifacts
+      # ── Caches ──────────────────────────────────────────────────────────────
+      - name: Cache Rust build
         uses: swatinem/rust-cache@v2
         with:
-          workspaces: 'source-repo/TurboRepo/apps/user-app/src-tauri'
+          workspaces:     ${{ env.TAURI_SRC_PATH }}
+          cache-on-failure: true
 
       - name: Cache apt packages
         if: matrix.platform == 'ubuntu-22.04'
         uses: actions/cache@v4
         with:
           path: /var/cache/apt/archives
-          key: ${{ runner.os }}-apt-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-apt-
+          key:  ${{ runner.os }}-apt-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-apt-
 
-      - name: Install Linux dependencies (Ubuntu only)
+      # ── Platform deps ───────────────────────────────────────────────────────
+      - name: Install Linux system libraries
         if: matrix.platform == 'ubuntu-22.04'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libssl-dev
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev libappindicator3-dev \
+            librsvg2-dev patchelf libssl-dev
 
-      - name: Install Node dependencies in source repository
+      # ── Node deps ───────────────────────────────────────────────────────────
+      - name: Install Node dependencies
         run: |
-          cd source-repo/TurboRepo
-          pnpm install --no-frozen-lockfile
+          cd ${{ env.TURBO_ROOT }}
+          pnpm install --frozen-lockfile
 
-      - name: Generate Platform App Icons
+      # ── Icons ───────────────────────────────────────────────────────────────
+      - name: Generate app icons
         run: |
-          cd source-repo/TurboRepo/apps/user-app
+          cd ${{ env.TAURI_APP_PATH }}
           pnpm exec tauri icon src-tauri/icons/icon.png
 
-      - name: Setup Windows Code Signing Certificate
+      # ── Windows code-signing cert ────────────────────────────────────────────
+      - name: Import Windows code-signing certificate
         if: matrix.platform == 'windows-latest'
-        env:
-          WINDOWS_CERTIFICATE_BASE64: ${{ secrets.WINDOWS_CERTIFICATE_BASE64 }}
-          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
         shell: powershell
+        env:
+          WINDOWS_CERTIFICATE_BASE64:   ${{ secrets.WINDOWS_CERTIFICATE_BASE64 }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
         run: |
-          if ($env:WINDOWS_CERTIFICATE_BASE64) {
-            $certBytes = [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE_BASE64.Trim())
-            [IO.File]::WriteAllBytes("cert.pfx", $certBytes)
-            $securePassword = ConvertTo-SecureString -String $env:WINDOWS_CERTIFICATE_PASSWORD -Force -AsPlainText
-            $cert = Import-PfxCertificate -FilePath "cert.pfx" -CertStoreLocation "Cert:\CurrentUser\My" -Password $securePassword
-            Remove-Item "cert.pfx" -Force -ErrorAction SilentlyContinue
-            echo "TAURI_WINDOWS_CERTIFICATE_THUMBPRINT=$($cert.Thumbprint)" | Out-File -FilePath $env:GITHUB_ENV -Append
-          } else {
-            $cert = New-SelfSignedCertificate -Type CodeSigningCert -Subject "CN=Velocity, O=Velocity Cloud Inc, L=San Francisco, S=California, C=US" -CertStoreLocation "Cert:\CurrentUser\My" -KeyExportPolicy Exportable -KeySpec Signature -KeyLength 2048 -KeyAlgorithm RSA -HashAlgorithm SHA256 -NotAfter (Get-Date).AddYears(5)
-            echo "TAURI_WINDOWS_CERTIFICATE_THUMBPRINT=$($cert.Thumbprint)" | Out-File -FilePath $env:GITHUB_ENV -Append
+          if (-not $env:WINDOWS_CERTIFICATE_BASE64) {
+            Write-Error "::error::WINDOWS_CERTIFICATE_BASE64 secret is not set. Aborting."
+            exit 1
           }
+          $certBytes  = [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE_BASE64.Trim())
+          $pfxPath    = Join-Path $env:RUNNER_TEMP "win_cert.pfx"
+          [IO.File]::WriteAllBytes($pfxPath, $certBytes)
+          $securePass = ConvertTo-SecureString $env:WINDOWS_CERTIFICATE_PASSWORD -AsPlainText -Force
 
-      - name: Build Tauri App from source-repo
+          # Import into Personal store — signtool uses this to locate the private key
+          $cert = Import-PfxCertificate -FilePath $pfxPath -CertStoreLocation Cert:\CurrentUser\My -Password $securePass
+
+          Remove-Item $pfxPath -Force
+          "WIN_CERT_THUMBPRINT=$($cert.Thumbprint)" | Out-File $env:GITHUB_ENV -Append
+
+      # ── Tauri build + GitHub Release creation ────────────────────────────────
+      - name: Build Tauri app & create release
         uses: tauri-apps/tauri-action@v0
         env:
-          GITHUB_TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN }}
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          GITHUB_TOKEN:                      ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY:         ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
-          tagName: ${{ github.ref_name }}
-          releaseName: 'Velocity Desktop & VS Code Extension ${{ github.ref_name }}'
-          releaseBody: |
-            ## 🚀 Velocity Cloud Workspaces & Applications (${{ github.ref_name }})
+          tagName:      ${{ github.ref_name }}
+          releaseName:  'Velocity ${{ github.ref_name }}'
+          releaseBody:  |
+            ## 🚀 Velocity Cloud Workspaces — ${{ github.ref_name }}
 
-            Welcome to the official production release of **Velocity Desktop** and the **Velocity VS Code Extension**.
+            ### 🖥️ Desktop Application
+            | Platform | Download |
+            |---|---|
+            | 🍏 macOS Apple Silicon | `Velocity_Desktop_*_aarch64.dmg` |
+            | 🍏 macOS Intel         | `Velocity_Desktop_*_x64.dmg` |
+            | 🪟 Windows             | `Velocity_Desktop_*_x64-setup.exe` / `.msi` |
+            | 🐧 Linux               | `Velocity_Desktop_*_amd64.AppImage` / `.deb` |
+            | 🤖 Android             | `Velocity_Android_${{ github.ref_name }}.apk` |
 
-            ---
+            ### ⚡ VS Code Extension
+            | File | Description |
+            |---|---|
+            | `velocity-vscode-${{ github.ref_name }}.vsix` | Install via *Extensions → Install from VSIX…* |
+            | `velocity-vscode-${{ github.ref_name }}.vsix.sha256` | SHA-256 integrity checksum |
 
-            ### 🖥️ **1. Velocity Desktop Application**
-            High-performance native client for macOS, Windows, and Linux to spin up and manage cloud development sandboxes & GPU containers.
-
-            - 🤖 **Android**: Download `Velocity_Android_${{ github.ref_name }}.apk`
-            - 🍏 **macOS (Apple Silicon)**: Download `Velocity_Desktop_*_aarch64.dmg`
-            - 🍏 **macOS (Intel)**: Download `Velocity_Desktop_*_x64.dmg`
-            - 🪟 **Windows**: Download `Velocity_Desktop_*_x64-setup.exe` or `.msi`
-            - 🐧 **Linux**: Download `Velocity_Desktop_*_amd64.AppImage` or `.deb`
-
-            ---
-
-            ### ⚡ **2. Velocity VS Code Extension (`.vsix`)**
-            Seamlessly manage sandboxes, view real-time spend analytics, and connect to Velocity MCP servers right inside VS Code.
-
-            - 🔌 **Extension Package**: Download `velocity-vscode-${{ github.ref_name }}.vsix`
-
-            #### 📖 **Installation Instructions for VS Code Extension:**
-            1. Download `velocity-vscode-${{ github.ref_name }}.vsix` below.
-            2. Open VS Code.
-            3. Press `Ctrl+Shift+X` (or `Cmd+Shift+X` on Mac) to open Extensions.
-            4. Click the **`...`** (Views & More Actions) menu in the top right corner of the Extensions sidebar.
-            5. Select **Install from VSIX...** and pick the downloaded `.vsix` file.
-            6. Run `Velocity: Sign In / Set API Key` from the Command Palette (`Ctrl+Shift+P` / `Cmd+Shift+P`) to connect your account.
+            > **Verify VSIX integrity**  
+            > `certutil -hashfile velocity-vscode-${{ github.ref_name }}.vsix SHA256` (Windows)  
+            > `sha256sum velocity-vscode-${{ github.ref_name }}.vsix` (Linux/macOS)  
+            > Compare with the contents of `velocity-vscode-${{ github.ref_name }}.vsix.sha256`.
           releaseDraft: false
-          prerelease: false
-          projectPath: './source-repo/TurboRepo/apps/user-app'
-          args: ${{ matrix.args }}
+          prerelease:   ${{ github.event.inputs.prerelease == 'true' }}
+          projectPath:  './${{ env.TAURI_APP_PATH }}'
+          args:         ${{ matrix.args }}
 
-      - name: Sign & Verify Windows Binaries (signtool)
+      # ── Re-sign + verify Windows binaries ───────────────────────────────────
+      - name: Sign & verify Windows binaries
         if: matrix.platform == 'windows-latest'
         shell: powershell
         run: |
-          $signtool = (Get-ChildItem -Path "C:\Program Files (x86)\Windows Kits\10\bin\*\x64\signtool.exe" | Select-Object -First 1).FullName
-          Get-ChildItem -Path "source-repo/TurboRepo/apps/user-app/src-tauri/target/release/bundle" -Recurse -Include *.exe,*.msi | ForEach-Object {
-            & $signtool sign /sha1 $env:TAURI_WINDOWS_CERTIFICATE_THUMBPRINT /fd sha256 /tr http://timestamp.digicert.com /td sha256 /d "Velocity Desktop" /du "https://velocity.fairarena.app" $_.FullName
+          $signtool = (Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin\*\x64\signtool.exe" |
+                       Sort-Object FullName -Descending | Select-Object -First 1).FullName
+          if (-not $signtool) { Write-Error "signtool.exe not found"; exit 1 }
+
+          $bundles = Get-ChildItem "${{ env.TAURI_BUNDLE_PATH }}" -Recurse -Include *.exe,*.msi
+          foreach ($file in $bundles) {
+            Write-Host "Signing $($file.Name)..."
+            & $signtool sign /sha1 $env:WIN_CERT_THUMBPRINT /fd sha256 `
+              /tr http://timestamp.digicert.com /td sha256 `
+              /d "Velocity Desktop" /du "https://velocity.fairarena.app" `
+              $file.FullName
+            if ($LASTEXITCODE -ne 0) { Write-Error "Signing failed for $($file.Name)"; exit 1 }
+
+            # Verify with Get-AuthenticodeSignature — works for self-signed certs.
+            # signtool verify /pa always fails for self-signed because it requires
+            # a trusted commercial CA chain. Get-AuthenticodeSignature confirms the
+            # signature is present and issued by our cert regardless of CA trust.
+            $sig = Get-AuthenticodeSignature $file.FullName
+            if ($sig.SignerCertificate -eq $null -or $sig.Status -eq 'NotSigned') {
+              Write-Error "Signature missing on $($file.Name) after signing step."
+              exit 1
+            }
+            if ($sig.SignerCertificate.Thumbprint -ne $env:WIN_CERT_THUMBPRINT) {
+              Write-Error "Wrong signer on $($file.Name). Expected $env:WIN_CERT_THUMBPRINT, got $($sig.SignerCertificate.Thumbprint)"
+              exit 1
+            }
+            Write-Host "SIGNED OK: $($file.Name) [status=$($sig.Status), thumbprint=$($sig.SignerCertificate.Thumbprint)]"
           }
 
-      - name: Export & Upload Windows Public Root Certificate & Signed Binaries
+      # ── Export root cert + upload extra assets ───────────────────────────────
+      - name: Export Windows root certificate
         if: matrix.platform == 'windows-latest'
         shell: powershell
         run: |
-          $cert = Get-Item "Cert:\CurrentUser\My\$($env:TAURI_WINDOWS_CERTIFICATE_THUMBPRINT)"
-          Export-Certificate -Cert $cert -FilePath "Velocity_Root_Certificate.cer" -Type CERT
+          $cert = Get-Item "Cert:\CurrentUser\My\$env:WIN_CERT_THUMBPRINT"
+          Export-Certificate -Cert $cert -FilePath Velocity_Root_Certificate.cer -Type CERT
 
-      - name: Upload Signed Windows Binaries & Updater Signatures to GitHub Release
+      - name: Upload extra Windows release assets
         if: matrix.platform == 'windows-latest'
         uses: softprops/action-gh-release@v2
         with:
-          files: |
-            source-repo/TurboRepo/apps/user-app/src-tauri/target/release/bundle/nsis/*.exe
-            source-repo/TurboRepo/apps/user-app/src-tauri/target/release/bundle/nsis/*.exe.sig
-            source-repo/TurboRepo/apps/user-app/src-tauri/target/release/bundle/msi/*.msi
-            source-repo/TurboRepo/apps/user-app/src-tauri/target/release/bundle/msi/*.msi.sig
-            Velocity_Root_Certificate.cer
           tag_name: ${{ github.ref_name }}
+          files: |
+            ${{ env.TAURI_BUNDLE_PATH }}/nsis/*.exe
+            ${{ env.TAURI_BUNDLE_PATH }}/nsis/*.exe.sig
+            ${{ env.TAURI_BUNDLE_PATH }}/msi/*.msi
+            ${{ env.TAURI_BUNDLE_PATH }}/msi/*.msi.sig
+            Velocity_Root_Certificate.cer
         env:
-          GITHUB_TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-  # ── 2. Android APK Release Job (Tauri Android) ────────────────────────────
+
+# ═══════════════════════════════════════════════════════════════════════════
+# JOB 2 ── Android APK
+# ═══════════════════════════════════════════════════════════════════════════
   release-android:
-    name: Build & Release Android App (.apk)
+    name: Android APK
+    timeout-minutes: 90
     runs-on: ubuntu-latest
     permissions:
       contents: write
+
     steps:
-      - name: Checkout public release repo
+      - name: Checkout release repo
         uses: actions/checkout@v4
 
-      - name: Checkout private source repository (Velocity)
+      - name: Checkout private source repo
         uses: actions/checkout@v4
         with:
           repository: 'Saksham-Goel1107/Velocity'
-          token: ${{ secrets.PRIVATE_REPO_TOKEN }}
-          path: 'source-repo'
+          token:      ${{ secrets.PRIVATE_REPO_TOKEN }}
+          path:       'source-repo'
 
-      - name: Setup Java JDK 17
+      # ── Toolchain ───────────────────────────────────────────────────────────
+      - name: Setup Java 17
         uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
@@ -201,155 +271,274 @@ jobs:
       - name: Setup Android SDK
         uses: android-actions/setup-android@v4
 
-      - name: Install Android NDK & Build Tools
-        run: |
-          sdkmanager --install "ndk;26.1.10909125" "build-tools;34.0.0" "platforms;android-34"
+      - name: Install Android NDK 26 & build-tools 34
+        run: sdkmanager --install "ndk;26.1.10909125" "build-tools;34.0.0" "platforms;android-34"
 
-      - name: Install pnpm v12
+      - name: Install pnpm ${{ env.PNPM_VERSION }}
         uses: pnpm/action-setup@v4
         with:
-          version: 12
+          version: ${{ env.PNPM_VERSION }}
 
-      - name: Setup Node.js v26 with pnpm cache
+      - name: Setup Node ${{ env.NODE_VERSION }}
         uses: actions/setup-node@v7
         with:
-          node-version: 26
-          cache: 'pnpm'
-          cache-dependency-path: 'source-repo/TurboRepo/pnpm-lock.yaml'
+          node-version:          ${{ env.NODE_VERSION }}
+          cache:                 'pnpm'
+          cache-dependency-path: ${{ env.PNPM_LOCK_PATH }}
 
-      - name: Install Rust stable & Android targets
+      - name: Install Rust (Android targets)
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: 'aarch64-linux-android,x86_64-linux-android'
 
-      - name: Cache Rust dependencies & build artifacts
+      # ── Caches ──────────────────────────────────────────────────────────────
+      - name: Cache Rust build
         uses: swatinem/rust-cache@v2
         with:
-          workspaces: 'source-repo/TurboRepo/apps/user-app/src-tauri'
+          workspaces:       ${{ env.TAURI_SRC_PATH }}
+          cache-on-failure: true
 
-      - name: Install Node dependencies in source repository
+      - name: Cache Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key:          ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
+          restore-keys: ${{ runner.os }}-gradle-
+
+      # ── Build ────────────────────────────────────────────────────────────────
+      - name: Install Node dependencies
         run: |
-          cd source-repo/TurboRepo
-          pnpm install --no-frozen-lockfile
+          cd ${{ env.TURBO_ROOT }}
+          pnpm install --frozen-lockfile
 
-      - name: Initialize & Build Tauri Android APK
+      - name: Build Android APK
         env:
           NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/26.1.10909125
         run: |
-          cd source-repo/TurboRepo/apps/user-app
+          cd ${{ env.TAURI_APP_PATH }}
           pnpm exec tauri icon src-tauri/icons/icon.png
           pnpm exec tauri android init
-          
-          # Replace default Tauri Android launcher icons with custom Velocity brand icons
+
           if [ -d "src-tauri/icons/android" ]; then
-            echo "Copying custom Velocity brand icons into generated Android project..."
             mkdir -p src-tauri/gen/android/app/src/main/res
             cp -rf src-tauri/icons/android/* src-tauri/gen/android/app/src/main/res/
           fi
-          
+
           pnpm exec tauri android build --apk
 
-      - name: Setup Android Keystore & Sign APK
+      # ── Sign ────────────────────────────────────────────────────────────────
+      - name: Sign APK
         env:
-          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_BASE64:  ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
           ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
-          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
-          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          ANDROID_KEY_ALIAS:        ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD:     ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: |
-          # Add Android build-tools (zipalign & apksigner) to PATH
-          BUILD_TOOLS_PATH=$(find ${{ env.ANDROID_HOME }}/build-tools -mindepth 1 -maxdepth 1 -type d | sort -V | tail -n 1)
-          export PATH="$BUILD_TOOLS_PATH:$PATH"
-
-          mkdir -p output-apk
-
-          if [ -n "$ANDROID_KEYSTORE_BASE64" ]; then
-            echo "$ANDROID_KEYSTORE_BASE64" | tr -d '\r\n ' | base64 -d > release.keystore
-          else
-            keytool -genkeypair -v -keystore release.keystore -alias "$ANDROID_KEY_ALIAS" -keyalg RSA -keysize 2048 -validity 10000 -storepass "$ANDROID_KEYSTORE_PASSWORD" -keypass "$ANDROID_KEY_PASSWORD" -dname "CN=Velocity, OU=Engineering, O=Velocity Cloud Inc, L=San Francisco, ST=CA, C=US"
-          fi
-
-          # Locate all built APK files
-          APK_DIR="source-repo/TurboRepo/apps/user-app/src-tauri/gen/android/app/build/outputs/apk"
-          UNIVERSAL_APK=$(find "$APK_DIR" -type f -name "*universal*.apk" | head -n 1)
-          
-          if [ -z "$UNIVERSAL_APK" ]; then
-            UNIVERSAL_APK=$(find "$APK_DIR" -type f -name "*.apk" | head -n 1)
-          fi
-
-          if [ -z "$UNIVERSAL_APK" ]; then
-            echo "ERROR: No built APK found in Gradle output!"
+          if [ -z "$ANDROID_KEYSTORE_BASE64" ]; then
+            echo "::error::ANDROID_KEYSTORE_BASE64 secret is not set. Aborting."
             exit 1
           fi
 
-          # Align & Sign Primary Universal Release APK with standard name
-          zipalign -f -p -v 4 "$UNIVERSAL_APK" output-apk/aligned_main.apk || cp "$UNIVERSAL_APK" output-apk/aligned_main.apk
-          apksigner sign --ks release.keystore \
-            --ks-pass "pass:$ANDROID_KEYSTORE_PASSWORD" \
+          BUILD_TOOLS=$(find "$ANDROID_HOME/build-tools" -mindepth 1 -maxdepth 1 -type d | sort -V | tail -n 1)
+          export PATH="$BUILD_TOOLS:$PATH"
+
+          # Decode keystore to a temp file
+          KEYSTORE_FILE=$(mktemp --suffix=.keystore)
+          echo "$ANDROID_KEYSTORE_BASE64" | tr -d '\r\n ' | base64 -d > "$KEYSTORE_FILE"
+
+          APK_DIR="${{ env.TAURI_SRC_PATH }}/gen/android/app/build/outputs/apk"
+          UNIVERSAL_APK=$(find "$APK_DIR" -type f -name "*universal*.apk" | head -n 1)
+          [ -z "$UNIVERSAL_APK" ] && UNIVERSAL_APK=$(find "$APK_DIR" -type f -name "*.apk" | head -n 1)
+
+          if [ -z "$UNIVERSAL_APK" ]; then
+            echo "::error::No APK found in Gradle output!"
+            exit 1
+          fi
+
+          mkdir -p output-apk
+          ALIGNED="output-apk/aligned.apk"
+          SIGNED="output-apk/Velocity_Android_${{ github.ref_name }}.apk"
+
+          zipalign -f -p -v 4 "$UNIVERSAL_APK" "$ALIGNED"
+          apksigner sign \
+            --ks "$KEYSTORE_FILE" \
+            --ks-pass  "pass:$ANDROID_KEYSTORE_PASSWORD" \
             --ks-key-alias "$ANDROID_KEY_ALIAS" \
             --key-pass "pass:$ANDROID_KEY_PASSWORD" \
             --v1-signing-enabled true \
             --v2-signing-enabled true \
             --v3-signing-enabled true \
-            --out "output-apk/Velocity_Android_${{ github.ref_name }}.apk" \
-            output-apk/aligned_main.apk
-          rm -f output-apk/aligned_main.apk
+            --out "$SIGNED" "$ALIGNED"
 
-          apksigner verify "output-apk/Velocity_Android_${{ github.ref_name }}.apk"
+          rm -f "$ALIGNED" "$KEYSTORE_FILE"
+          apksigner verify --verbose "$SIGNED"
 
-      - name: Upload Android APK to GitHub Release
+      - name: Upload APK to release
         uses: softprops/action-gh-release@v2
         with:
-          files: output-apk/*.apk
           tag_name: ${{ github.ref_name }}
-          name: 'Velocity Desktop, Mobile & Extensions ${{ github.ref_name }}'
+          files:    output-apk/*.apk
         env:
-          GITHUB_TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-  # ── 3. VS Code Extension Packaging & Release Job ───────────────────────────
+
+# ═══════════════════════════════════════════════════════════════════════════
+# JOB 3 ── VS Code Extension (.vsix)
+#
+# Signing strategy:
+#   VSIX files are ZIP archives – signtool (Authenticode) cannot sign them.
+#   Instead we use .NET RSA APIs to produce a detached RSA-SHA256 signature
+#   file (.vsix.sig) and a SHA-256 checksum file (.vsix.sha256).
+#   Users verify integrity with the checksum; the .sig file allows
+#   programmatic verification against the exported public certificate.
+# ═══════════════════════════════════════════════════════════════════════════
   release-extension:
-    name: Package & Release VS Code Extension (.vsix)
-    runs-on: ubuntu-latest
+    name: VS Code Extension (.vsix)
+    timeout-minutes: 30
+    runs-on: windows-latest
     permissions:
       contents: write
+
     steps:
-      - name: Checkout public release repo
+      - name: Checkout release repo
         uses: actions/checkout@v4
 
-      - name: Checkout private source repository (Velocity)
+      - name: Checkout private source repo
         uses: actions/checkout@v4
         with:
           repository: 'Saksham-Goel1107/Velocity'
-          token: ${{ secrets.PRIVATE_REPO_TOKEN }}
-          path: 'source-repo'
+          token:      ${{ secrets.PRIVATE_REPO_TOKEN }}
+          path:       'source-repo'
 
-      - name: Install pnpm v12
+      # ── Toolchain ───────────────────────────────────────────────────────────
+      - name: Install pnpm ${{ env.PNPM_VERSION }}
         uses: pnpm/action-setup@v4
         with:
-          version: 12
+          version: ${{ env.PNPM_VERSION }}
 
-      - name: Setup Node.js v26 with pnpm cache
+      - name: Setup Node ${{ env.NODE_VERSION }}
         uses: actions/setup-node@v7
         with:
-          node-version: 26
-          cache: 'pnpm'
-          cache-dependency-path: 'source-repo/TurboRepo/pnpm-lock.yaml'
+          node-version:          ${{ env.NODE_VERSION }}
+          cache:                 'pnpm'
+          cache-dependency-path: ${{ env.PNPM_LOCK_PATH }}
 
-      - name: Install Node dependencies in source repository
-        run: |
-          cd source-repo/TurboRepo
-          pnpm install --no-frozen-lockfile
+      # ── Caches ──────────────────────────────────────────────────────────────
+      - name: Cache pnpm store
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~\AppData\Local\pnpm\store
+            ~\.pnpm-store
+          key:          ${{ runner.os }}-pnpm-${{ hashFiles(env.PNPM_LOCK_PATH) }}
+          restore-keys: ${{ runner.os }}-pnpm-
 
-      - name: Package VS Code Extension (.vsix)
+      - name: Cache npm (vsce)
+        uses: actions/cache@v4
+        with:
+          path:         ~\.npm
+          key:          ${{ runner.os }}-npm-vsce-${{ hashFiles(env.PNPM_LOCK_PATH) }}
+          restore-keys: ${{ runner.os }}-npm-vsce-
+
+      # ── Build ────────────────────────────────────────────────────────────────
+      - name: Install Node dependencies
         run: |
-          cd source-repo/TurboRepo/apps/vscode-extension
+          cd ${{ env.TURBO_ROOT }}
+          pnpm install --frozen-lockfile
+
+      - name: Compile extension
+        shell: pwsh
+        run: |
+          cd ${{ env.VSCODE_EXT_PATH }}
           pnpm run compile
-          npx @vscode/vsce package --out ../../../../velocity-vscode-${{ github.ref_name }}.vsix
 
-      - name: Upload .vsix to GitHub Release
+      - name: Package VSIX
+        shell: pwsh
+        run: |
+          cd ${{ env.VSCODE_EXT_PATH }}
+          $vsix = "../../../../velocity-vscode-${{ github.ref_name }}.vsix"
+          npx --yes @vscode/vsce package --out $vsix
+          if (-not (Test-Path $vsix)) {
+            Write-Error "::error::VSIX not created at expected path"
+            exit 1
+          }
+
+      # ── Sign VSIX ────────────────────────────────────────────────────────────
+      # signtool cannot sign ZIP/VSIX files (only PE/MSI/CAB).
+      # We use .NET RSA APIs: import the PFX → sign the raw bytes → write .sig.
+      # The public cert is exported as .cer so users can independently verify.
+      - name: Import signing certificate
+        shell: pwsh
+        env:
+          VSIX_CERTIFICATE_BASE64:   ${{ secrets.VSIX_CERTIFICATE_BASE64 }}
+          VSIX_CERTIFICATE_PASSWORD: ${{ secrets.VSIX_CERTIFICATE_PASSWORD }}
+        run: |
+          if (-not $env:VSIX_CERTIFICATE_BASE64) {
+            Write-Error "::error::VSIX_CERTIFICATE_BASE64 secret is not set. Run scripts/generate-vsix-cert.ps1 and store the outputs as GitHub secrets."
+            exit 1
+          }
+
+          $pfxPath = Join-Path $env:RUNNER_TEMP "vsix_cert.pfx"
+          [IO.File]::WriteAllBytes($pfxPath, [Convert]::FromBase64String($env:VSIX_CERTIFICATE_BASE64.Trim()))
+
+          $securePass = ConvertTo-SecureString $env:VSIX_CERTIFICATE_PASSWORD -AsPlainText -Force
+          $cert       = Import-PfxCertificate -FilePath $pfxPath -CertStoreLocation Cert:\CurrentUser\My -Password $securePass
+          Remove-Item $pfxPath -Force
+
+          Write-Host "Certificate imported: $($cert.Subject) [thumbprint: $($cert.Thumbprint)]"
+          "VSIX_CERT_THUMBPRINT=$($cert.Thumbprint)" | Out-File $env:GITHUB_ENV -Append
+
+      - name: Sign VSIX (RSA-SHA256 detached signature)
+        shell: pwsh
+        run: |
+          $vsixFile = "velocity-vscode-${{ github.ref_name }}.vsix"
+          $sigFile  = "$vsixFile.sig"
+          $cerFile  = "velocity-vscode-${{ github.ref_name }}.cert.cer"
+
+          $cert = Get-Item "Cert:\CurrentUser\My\$env:VSIX_CERT_THUMBPRINT"
+
+          # Sign raw bytes with RSA-SHA256 (PKCS#1 v1.5)
+          $rsa       = [System.Security.Cryptography.X509Certificates.RSACertificateExtensions]::GetRSAPrivateKey($cert)
+          $fileBytes = [IO.File]::ReadAllBytes($vsixFile)
+          $sigBytes  = $rsa.SignData($fileBytes, [System.Security.Cryptography.HashAlgorithmName]::SHA256,
+                                    [System.Security.Cryptography.RSASignaturePadding]::Pkcs1)
+          [IO.File]::WriteAllBytes($sigFile, $sigBytes)
+
+          # Verify immediately
+          $pub      = [System.Security.Cryptography.X509Certificates.RSACertificateExtensions]::GetRSAPublicKey($cert)
+          $valid    = $pub.VerifyData($fileBytes, $sigBytes,
+                                     [System.Security.Cryptography.HashAlgorithmName]::SHA256,
+                                     [System.Security.Cryptography.RSASignaturePadding]::Pkcs1)
+          if (-not $valid) {
+            Write-Error "::error::Signature verification failed after signing!"
+            exit 1
+          }
+          Write-Host "VSIX SIGNED OK: RSA-SHA256 signature verified."
+
+          # Export public cert so users can verify offline
+          Export-Certificate -Cert $cert -FilePath $cerFile -Type CERT
+          Write-Host "CERT EXPORTED: $cerFile"
+
+      - name: Generate SHA-256 checksum
+        shell: pwsh
+        run: |
+          $vsixFile  = "velocity-vscode-${{ github.ref_name }}.vsix"
+          $sha256    = (Get-FileHash $vsixFile -Algorithm SHA256).Hash.ToLower()
+          $checksumFile = "$vsixFile.sha256"
+          "$sha256  $vsixFile" | Out-File -FilePath $checksumFile -Encoding ascii
+          Write-Host "SHA-256: $sha256"
+
+      # ── Upload ───────────────────────────────────────────────────────────────
+      - name: Upload VSIX + signature + checksum to release
         uses: softprops/action-gh-release@v2
         with:
-          files: velocity-vscode-*.vsix
           tag_name: ${{ github.ref_name }}
-          name: 'Velocity Apps & Extensions ${{ github.ref_name }}'
+          files: |
+            velocity-vscode-${{ github.ref_name }}.vsix
+            velocity-vscode-${{ github.ref_name }}.vsix.sig
+            velocity-vscode-${{ github.ref_name }}.vsix.sha256
+            velocity-vscode-${{ github.ref_name }}.cert.cer
         env:
-          GITHUB_TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
