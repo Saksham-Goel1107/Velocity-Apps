@@ -35,15 +35,15 @@ jobs:
           token: ${{ secrets.PRIVATE_REPO_TOKEN }}
           path: 'source-repo'
 
-      - name: Install pnpm v11
+      - name: Install pnpm v12
         uses: pnpm/action-setup@v4
         with:
-          version: 11
+          version: 12
 
-      - name: Setup Node.js v24 with pnpm cache
-        uses: actions/setup-node@v4
+      - name: Setup Node.js v26 with pnpm cache
+        uses: actions/setup-node@v7
         with:
-          node-version: 24
+          node-version: 26
           cache: 'pnpm'
           cache-dependency-path: 'source-repo/TurboRepo/pnpm-lock.yaml'
 
@@ -199,21 +199,21 @@ jobs:
           java-version: '17'
 
       - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
+        uses: android-actions/setup-android@v4
 
       - name: Install Android NDK & Build Tools
         run: |
           sdkmanager --install "ndk;26.1.10909125" "build-tools;34.0.0" "platforms;android-34"
 
-      - name: Install pnpm v11
+      - name: Install pnpm v12
         uses: pnpm/action-setup@v4
         with:
-          version: 11
+          version: 12
 
-      - name: Setup Node.js v24 with pnpm cache
-        uses: actions/setup-node@v4
+      - name: Setup Node.js v26 with pnpm cache
+        uses: actions/setup-node@v7
         with:
-          node-version: 24
+          node-version: 26
           cache: 'pnpm'
           cache-dependency-path: 'source-repo/TurboRepo/pnpm-lock.yaml'
 
@@ -322,15 +322,15 @@ jobs:
           token: ${{ secrets.PRIVATE_REPO_TOKEN }}
           path: 'source-repo'
 
-      - name: Install pnpm v11
+      - name: Install pnpm v12
         uses: pnpm/action-setup@v4
         with:
-          version: 11
+          version: 12
 
-      - name: Setup Node.js v24 with pnpm cache
-        uses: actions/setup-node@v4
+      - name: Setup Node.js v26 with pnpm cache
+        uses: actions/setup-node@v7
         with:
-          node-version: 24
+          node-version: 26
           cache: 'pnpm'
           cache-dependency-path: 'source-repo/TurboRepo/pnpm-lock.yaml'
 
